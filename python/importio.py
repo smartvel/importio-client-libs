@@ -9,13 +9,20 @@ Dependencies: Python 2.7
 @source: https://github.com/import-io/importio-client-libs/tree/master/python
 '''
 
-import threading, logging, uuid, json, urllib, urllib2, cookielib, gzip, Queue
-from cookielib import CookieJar, DefaultCookiePolicy
+import threading
+import logging
+import uuid
+import json
+import gzip
+import queue
+import urllib.request, urllib.parse, urllib.error
+from http import cookiejar
 from _pyio import BytesIO
 
 # Set up the logging configuration if anyone wants useful output
 logging.basicConfig()
 logger = logging.getLogger(__name__)
+
 
 class query_state:
     '''
@@ -33,7 +40,7 @@ class query_state:
         self.jobsCompleted = 0
         self._finished = False
         self._callback = callback
-    
+
     def _onMessage(self, data):
         '''
         Method that is called when a new message is received
@@ -43,27 +50,27 @@ class query_state:
         msgType = data["type"]
         if msgType == u"SPAWN":
             # A spawn message means that a new job is being initialised on the server
-            self.jobsSpawned+=1
+            self.jobsSpawned += 1
         elif msgType == u"INIT" or msgType == u"START":
             # Init and start indicate that a page of work has been started on the server
-            self.jobsStarted+=1
+            self.jobsStarted += 1
         elif msgType == u"STOP":
             # Stop indicates that a job has finished on the server
-            self.jobsCompleted+=1
-        
+            self.jobsCompleted += 1
+
         # Update the finished state
         # The query is finished if we have started some jobs, we have finished as many as we started, and we have started as many as we have spawned
         # There is a +1 on jobsSpawned because there is an initial spawn to cover initialising all of the jobs for the query
         self._finished = self.jobsStarted > 0 and self.jobsStarted is self.jobsCompleted and self.jobsSpawned + 1 is self.jobsStarted;
-        
+
         # These error conditions mean the query has been terminated on the server
         # It either errored on the import.io end, the user was not logged in, or the query was cancelled on the server
         if msgType == u"ERROR" or msgType == u"UNAUTH" or msgType == u"CANCEL":
             self._finished = True;
-        
+
         # Now we have processed the query state, we can return the data from the message back to listeners
         self._callback(self, data)
-        
+
     def finished(self):
         '''
         Returns boolean - true if the query has been completed or terminated
@@ -71,11 +78,12 @@ class query_state:
 
         return self._finished
 
+
 class importio:
     '''
     The main import.io client interface
     '''
-    
+
     def __init__(self, host="https://query.import.io", proxies={}, user_id=None, api_key=None):
         '''
         Initialises the client library with its configuration
@@ -118,7 +126,7 @@ class importio:
         # Disconnect an old session, if there is one
         if self.session is not None:
             self.disconnect()
-    
+
         # Reconnect using username/password if required
         if self.username is not None:
             self.login(self.username, self.password, self.login_host)
@@ -171,18 +179,19 @@ class importio:
 
         if self.session is None or not self.session.connected:
             logger.info("Queueing query: no connected session")
-            self.queue.append([query,callback])
+            self.queue.append([query, callback])
             return
 
         logger.info("Issuing query")
 
         self.session.query(query, callback)
 
+
 class session:
     '''
     Session manager, used for managing the message channel, sending queries and receiving data
     '''
-    
+
     def __init__(self, io, host, proxies, user_id, api_key):
         '''
         Initialises the session with its configuration
@@ -197,7 +206,7 @@ class session:
         self.queries = {}
         self.user_id = user_id
         self.api_key = api_key
-        self.queue = Queue.Queue()
+        self.queue = queue.Queue()
         self.connected = False
         self.connecting = False
         self.disconnecting = False
@@ -205,19 +214,19 @@ class session:
         # These variables serve to identify this client and its version to the server
         self.clientName = "import.io Python client"
         self.clientVersion = "2.0.0"
-        self.cj = cookielib.CookieJar()
-        self.opener = urllib2.build_opener(urllib2.ProxyHandler(proxies), urllib2.HTTPCookieProcessor(self.cj))
+        self.cj = cookiejar.CookieJar()
+        self.opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler(proxies),
+            urllib.request.HTTPCookieProcessor(self.cj)
+        )
 
-    def login(self, username, password, host):
-        '''
-        Provides an interface to authenticating with the platform using username and password
-        '''
-
-        r = self.opener.open("%s/auth/login" % host, urllib.urlencode( {'username': username, 'password': password} ) ) 
+    def login(self, username, password, host="https://api.import.io"):
+        r = self.opener.open("%s/auth/login" % host,
+                             urllib.parse.urlencode({'username': username, 'password': password}))
 
         if r.code is not 200:
             raise Exception("Could not log in, code %s" % r.code)
-    
+
     def request(self, channel, path="", data={}, throw=True):
         '''
         Helper method that makes a generic request on the messaging channel
@@ -230,21 +239,20 @@ class session:
         # We need to increment the message ID with each request that we send
         data["id"] = self.msgId
         self.msgId += 1
-        
+
         # If we have a client ID, then we need to send that (will be provided on handshake)
         if self.client_id is not None:
             data["clientId"] = self.client_id
-            
+
         # Build the URL that we are going to request
         url = "%s%s" % (self.url, path)
-        
+
         # If the user has chosen API key authentication, we need to send the API key with each request
         if self.api_key is not None:
-            url = "%s?&%s" % (url, urllib.urlencode({ "_user" : self.user_id, "_apikey" : self.api_key }) )
-        
+            url = "%s?&%s" % (url, urllib.parse.urlencode({"_user": self.user_id, "_apikey": self.api_key}) )
+
         # Build the request object we are going to use to initialise the request
-        request = urllib2.Request(url)
-        request.add_data(json.dumps([data]))
+        request = urllib.request.Request(url, data=json.dumps([data]).encode('utf-8'))
         request.add_header("Content-Type", "application/json;charset=UTF-8")
         request.add_header('Accept-encoding', 'gzip')
         request.add_header('import-io-client', self.clientName)
@@ -253,7 +261,7 @@ class session:
         # Send the request itself
         try:
             response = self.opener.open(request)
-        except urllib2.HTTPError:
+        except urllib.error.HTTPError:
             error_message = "Exception raised connecting to import.io for url %s" % url
             if throw:
                 raise Exception(error_message)
@@ -266,28 +274,29 @@ class session:
             return
 
         # If the server responds non-200 we have a serious issue (configuration wrong or server down)
-        if response.code != 200 :
+        if response.code != 200:
             error_message = "Unable to connect to import.io, status %s for url %s" % (response.code, url)
             if throw:
                 raise Exception(error_message)
             else:
                 logger.warn(error_message)
                 return
-        
+
         # If the data comes back as gzip, we need to manually decode it
         if response.info().get('Content-Encoding') == 'gzip':
             # Unfortunately we need to buffer it in memory to decode the gzip: http://bugs.python.org/issue914340
-            response.json = json.load(gzip.GzipFile(fileobj=BytesIO(response.read())))
+            raw_response = gzip.GzipFile(fileobj=BytesIO(response.read()))
+            response.json = json.loads(raw_response.read().decode('utf-8'))
         else:
-            response.json = json.load(response)
-        
+            response.json = json.loads(response.read().decode('utf-8'))
+
         # Iterate through each of the messages in the response content
         for msg in response.json:
             # If the message is not successful, i.e. an import.io server error has occurred, decide what action to take
             if "successful" in msg and msg["successful"] is not True:
                 errorMessage = "Unsuccessful request: %s" % msg
                 if not self.disconnecting and self.connected and not self.connecting:
-                    
+
                     # If we get a 402 unknown client we need to reconnect
                     if msg["error"] == "402::Unknown client":
                         logger.warn("402 received, reconnecting")
@@ -298,18 +307,18 @@ class session:
                 else:
                     logger.warn(errorMessage)
                     continue
-        
+
             # Ignore messages that come back on a CometD channel that we have not subscribed to
-            if msg["channel"] != self.messagingChannel : continue
-                
+            if msg["channel"] != self.messagingChannel: continue
+
             logger.debug("Got message")
 
             # Now we have a valid message on the right channel, queue it up to be processed
             self.queue.put(msg["data"])
-        
+
         # We have finished processing the response messages, return the response in case the client wants anything else from it
         return response
-    
+
     def handshake(self):
         '''
         This method uses the request helper to make a CometD handshake request to register the client on the server
@@ -321,7 +330,7 @@ class session:
         handshake = self.request("/meta/handshake", path="handshake", data={
             "version": "1.0",
             "minimumVersion": "0.9",
-            "supportedConnectionTypes": [ "long-polling" ],
+            "supportedConnectionTypes": ["long-polling"],
             "advice": {
                 "timeout": 60000,
                 "interval": 0
@@ -345,7 +354,7 @@ class session:
         return self.request("/meta/subscribe", data={
             "subscription": channel
         })
-    
+
     def connect(self):
         '''
         Connect this session to the import.io server if not already connected
@@ -360,7 +369,7 @@ class session:
 
         # Do the hanshake request to register the client on the server
         self.handshake()
-        
+
         # Register this client with a subscription to our chosen message channel
         self.subscribe(self.messagingChannel)
 
@@ -373,7 +382,7 @@ class session:
         self.poll_thread = threading.Thread(target=self.poll, args=())
         self.poll_thread.daemon = True
         self.poll_thread.start()
-        
+
         # Similarly with the polling, we need to handle queued messages in a separate thread too
         self.queue_thread = threading.Thread(target=self.poll_queue, args=())
         self.queue_thread.daemon = True
@@ -395,22 +404,22 @@ class session:
 
         # Set the flag to notify handlers that we are disconnecting, i.e. open connect calls will fail
         self.disconnecting = True
-        
+
         # Set the connection status flag in the library to prevent any other requests going out
         self.connected = False
-        
+
         # Make the disconnect request to the server
         self.request("/meta/disconnect", throw=False)
 
         # Now we are disconnected we need to remove the client ID
         self.client_id = None
-        
+
         # We are done disconnecting so reset the flag
         self.disconnecting = False
 
         # Send a "disconnected" message to all of the current queries, and then remove them
         for key, query in q.iteritems():
-            query._onMessage({ "type": "DISCONNECT", "requestId": key })
+            query._onMessage({"type": "DISCONNECT", "requestId": key})
 
 
     def poll_queue(self):
@@ -453,7 +462,7 @@ class session:
         This method is called by the queue poller to handle messages that are received from the import.io
         CometD server
         '''
-        
+
         try:
             # First we need to look up which query object the message corresponds to, based on its request ID
             request_id = data["requestId"]
@@ -462,7 +471,7 @@ class session:
             if not request_id in self.queries:
                 logger.warning("Unknown Request ID returned from server: %s" % request_id)
                 return
-            
+
             query = self.queries[request_id]
 
             # Call the message callback on the query object with the data
@@ -473,7 +482,7 @@ class session:
                 del self.queries[request_id]
         except:
             logger.error("Error", exc_info=True)
-        
+
     def query(self, query, callback):
         '''
         This method takes an import.io Query object and issues it to the server, calling the callback
@@ -486,4 +495,4 @@ class session:
         # Construct a new query state tracker and store it in our map of currently running queries
         self.queries[query["requestId"]] = query_state(callback, query)
         # Issue the query to the server
-        self.request("/service/query", data={ "data": query })
+        self.request("/service/query", data={"data": query})
